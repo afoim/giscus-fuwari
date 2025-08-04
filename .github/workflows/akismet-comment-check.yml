@@ -1,5 +1,4 @@
 name: Akismet Discussion Comment Checker
-
 on:
   discussion_comment:
     types: [created]
@@ -7,42 +6,68 @@ on:
 jobs:
   check-akismet:
     runs-on: ubuntu-latest
-    env:
-      AKISMET_API_KEY: ${{ secrets.AKISMET_API_KEY }}
-      GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
     steps:
-      - name: Dump environment and run spam check
-        shell: bash
+      - name: Check and delete spam comments
         env:
+          AKISMET_API_KEY: ${{ secrets.AKISMET_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
           COMMENT_URL: ${{ github.event.comment.url }}
           COMMENT_HTML_URL: ${{ github.event.comment.html_url }}
           DISCUSSION_TITLE: ${{ github.event.discussion.title }}
-          DISCUSSION_NUMBER: ${{ github.event.discussion.number }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
-          set -euxo pipefail
-
-          echo "===== 环境变量 ====="
-          echo "AKISMET_API_KEY=****"
-          echo "GITHUB_TOKEN=****"
-          echo "COMMENT_AUTHOR=${COMMENT_AUTHOR}"
-          echo "COMMENT_BODY preview: ${COMMENT_BODY:0:100}..."
-          echo "COMMENT_URL=${COMMENT_URL}"
-          echo "DISCUSSION_TITLE=${DISCUSSION_TITLE}"
-          echo "DISCUSSION_NUMBER=${DISCUSSION_NUMBER}"
-          echo "REPO_OWNER=${REPO_OWNER}"
-          echo "REPO_NAME=${REPO_NAME}"
-
+          set -uo pipefail
+          
+          echo "============================================"
+          echo "🤖 AKISMET SPAM DETECTION STARTED"
+          echo "============================================"
+          echo "⏰ Timestamp: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "👤 Comment Author: ${COMMENT_AUTHOR}"
+          echo "📝 Comment Length: ${#COMMENT_BODY} characters"
+          echo "🗂️ Repository: ${REPO_OWNER}/${REPO_NAME}"
+          echo "💬 Discussion: ${DISCUSSION_TITLE}"
+          echo "🔗 Comment URL: ${COMMENT_HTML_URL}"
+          echo ""
+          
+          echo "📄 COMMENT CONTENT:"
+          echo "----------------------------------------"
+          echo "${COMMENT_BODY}"
+          echo "----------------------------------------"
+          echo ""
+          
+          # 验证必要的环境变量
+          echo "🔧 ENVIRONMENT CHECK:"
+          if [[ -z "${AKISMET_API_KEY:-}" ]]; then
+            echo "❌ AKISMET_API_KEY is not set"
+            exit 1
+          else
+            echo "✅ AKISMET_API_KEY: ${AKISMET_API_KEY:0:8}..."
+          fi
+          
+          if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+            echo "❌ GITHUB_TOKEN is not set"
+            exit 1
+          else
+            echo "✅ GITHUB_TOKEN: ${GITHUB_TOKEN:0:8}..."
+          fi
+          echo ""
+          
+          # 构建 Akismet API 请求
+          echo "🌐 AKISMET API REQUEST:"
           AKISMET_URL="https://${AKISMET_API_KEY}.rest.akismet.com/1.1/comment-check"
-
-          echo "🔍 Checking comment from ${COMMENT_AUTHOR} for spam..."
-          echo "Comment preview: ${COMMENT_BODY:0:100}..."
-
-          # 调用 Akismet 检测垃圾评论
-          AKISMET_RESPONSE=$(curl -s -X POST "$AKISMET_URL" \
+          echo "📡 API Endpoint: ${AKISMET_URL:0:30}...comment-check"
+          echo "🏠 Blog URL: https://github.com/${REPO_OWNER}/${REPO_NAME}"
+          echo "🖥️ User IP: 127.0.0.1 (GitHub Actions default)"
+          echo "🕷️ User Agent: GitHubActionBot/1.0"
+          echo "📝 Comment Type: comment"
+          echo ""
+          
+          echo "🔄 Sending request to Akismet..."
+          AKISMET_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}\nTOTAL_TIME:%{time_total}" \
+            -X POST "$AKISMET_URL" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -H "User-Agent: GitHubActionBot/1.0" \
             --data-urlencode "blog=https://github.com/${REPO_OWNER}/${REPO_NAME}" \
@@ -51,94 +76,100 @@ jobs:
             --data-urlencode "comment_type=comment" \
             --data-urlencode "comment_author=${COMMENT_AUTHOR}" \
             --data-urlencode "comment_content=${COMMENT_BODY}" \
-          ) || (echo "⚠️ Akismet API 请求失败"; exit 1)
-
-          echo "Akismet response: ${AKISMET_RESPONSE}"
-
-          if [ "$AKISMET_RESPONSE" = "true" ]; then
-            echo "🚫 Spam detected! Taking action..."
-
-            # 从事件 JSON 文件中提取 comment ID
-            COMMENT_ID=$(jq --raw-output '.comment.id' < "$GITHUB_EVENT_PATH" || echo "")
-            if [ -z "$COMMENT_ID" ]; then
-              echo "❌ 无法从事件中获取 comment id，无法删除评论"
-              exit 2
-            fi
-
-            API_DELETE_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/discussions/comments/${COMMENT_ID}"
-            echo "删除评论 API URL: $API_DELETE_URL"
-
-            # 删除评论请求
-            DELETE_HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE "$API_DELETE_URL" \
+            2>/dev/null || echo "ERROR")
+          
+          # 解析响应
+          SPAM_CHECK_RESULT=$(echo "$AKISMET_RESPONSE" | head -n1)
+          HTTP_CODE=$(echo "$AKISMET_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+          RESPONSE_TIME=$(echo "$AKISMET_RESPONSE" | grep "TOTAL_TIME:" | cut -d: -f2)
+          
+          echo "📊 AKISMET RESPONSE:"
+          echo "📈 HTTP Status: ${HTTP_CODE:-unknown}"
+          echo "⏱️ Response Time: ${RESPONSE_TIME:-unknown}s"
+          echo "🎯 Spam Detection Result: '${SPAM_CHECK_RESULT}'"
+          echo ""
+          
+          # 检查是否为垃圾评论
+          if [ "$SPAM_CHECK_RESULT" = "true" ]; then
+            echo "🚨 SPAM DETECTED!"
+            echo "============================================"
+            echo "🗑️ Attempting to delete spam comment..."
+            echo ""
+            
+            echo "🔍 GitHub API DELETE Request:"
+            echo "📡 Endpoint: ${COMMENT_URL}"
+            echo "🔑 Authorization: token ${GITHUB_TOKEN:0:8}..."
+            echo "🕷️ User-Agent: AkismetBot/1.0"
+            echo ""
+            
+            DELETE_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}\nTOTAL_TIME:%{time_total}" \
+              -X DELETE "$COMMENT_URL" \
               -H "Authorization: token ${GITHUB_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
-              -H "User-Agent: AkismetBot/1.0" || echo "000")
-
-            echo "删除评论 HTTP 状态码: $DELETE_HTTP_CODE"
-
+              -H "User-Agent: AkismetBot/1.0" \
+              2>/dev/null || echo "ERROR")
+            
+            DELETE_HTTP_CODE=$(echo "$DELETE_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+            DELETE_TIME=$(echo "$DELETE_RESPONSE" | grep "TOTAL_TIME:" | cut -d: -f2)
+            DELETE_BODY=$(echo "$DELETE_RESPONSE" | head -n1)
+            
+            echo "📊 DELETE RESPONSE:"
+            echo "📈 HTTP Status: ${DELETE_HTTP_CODE:-unknown}"
+            echo "⏱️ Response Time: ${DELETE_TIME:-unknown}s"
+            
             if [ "$DELETE_HTTP_CODE" = "204" ]; then
-              echo "✅ Spam comment deleted successfully"
-
-              ISSUE_BODY="🤖 **Spam Detection Report**
-
-Akismet detected and removed a spam comment from @${COMMENT_AUTHOR}.
-
-**Discussion**: ${DISCUSSION_TITLE}
-**Original Comment URL**: ${COMMENT_HTML_URL}
-**Detection Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-
-**Content Preview** (first 200 chars):
-\`\`\`
-${COMMENT_BODY:0:200}$([ ${#COMMENT_BODY} -gt 200 ] && echo "...")
-\`\`\`
-
-_This issue was created automatically by the spam detection system._"
-
-              curl -s -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues" \
-                -H "Authorization: token ${GITHUB_TOKEN}" \
-                -H "Accept: application/vnd.github+json" \
-                -d "$(jq -n --arg title "[Auto] Spam Comment Removed from Discussion: ${DISCUSSION_TITLE}" \
-                            --arg body "$ISSUE_BODY" \
-                            --argjson labels '["spam","automated-moderation"]' \
-                            '{title: $title, body: $body, labels: $labels}')" \
-                || echo "❌ 创建垃圾评论报告 Issue 失败"
-
-              echo "📧 Spam report issue created"
-
+              echo "✅ SUCCESS: Spam comment deleted successfully"
+              echo "🎉 Comment from @${COMMENT_AUTHOR} has been removed"
             else
-              echo "❌ Failed to delete comment (HTTP $DELETE_HTTP_CODE)"
-
-              ALERT_BODY="⚠️ **Spam Detection Alert**
-
-Akismet detected spam content from @${COMMENT_AUTHOR}, but automatic deletion failed.
-
-**Discussion**: ${DISCUSSION_TITLE}
-**Comment URL**: ${COMMENT_HTML_URL}
-**Detection Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-
-**Action Required**: Please manually review and moderate this comment.
-
-**Content Preview** (first 200 chars):
-\`\`\`
-${COMMENT_BODY:0:200}$([ ${#COMMENT_BODY} -gt 200 ] && echo "...")
-\`\`\`
-
-_This alert was generated automatically. Manual intervention required._"
-
-              curl -s -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues" \
+              echo "❌ FAILED: Could not delete comment"
+              echo "🔍 HTTP Status Code: ${DELETE_HTTP_CODE}"
+              if [[ -n "$DELETE_BODY" && "$DELETE_BODY" != "ERROR" ]]; then
+                echo "📄 Response Body: ${DELETE_BODY}"
+              fi
+              
+              # 尝试获取更多错误信息
+              echo ""
+              echo "🔍 DEBUGGING - Checking comment accessibility..."
+              CHECK_RESPONSE=$(curl -s -w "HTTP_CODE:%{http_code}" \
                 -H "Authorization: token ${GITHUB_TOKEN}" \
                 -H "Accept: application/vnd.github+json" \
-                -d "$(jq -n --arg title "[URGENT] Spam Detected - Manual Review Required: ${DISCUSSION_TITLE}" \
-                            --arg body "$ALERT_BODY" \
-                            --argjson labels '["spam","manual-review-required","urgent"]' \
-                            '{title: $title, body: $body, labels: $labels}')" \
-                || echo "❌ 创建人工复核提醒 Issue 失败"
-
-              echo "🚨 Manual review alert created"
+                -H "User-Agent: AkismetBot/1.0" \
+                "$COMMENT_URL" 2>/dev/null || echo "ERROR")
+              
+              CHECK_HTTP_CODE=$(echo "$CHECK_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
+              echo "🔍 Comment Check Status: ${CHECK_HTTP_CODE:-unknown}"
+              
+              if [ "$CHECK_HTTP_CODE" = "200" ]; then
+                echo "ℹ️ Comment exists and is accessible"
+              elif [ "$CHECK_HTTP_CODE" = "404" ]; then
+                echo "ℹ️ Comment not found (may have been deleted already)"
+              elif [ "$CHECK_HTTP_CODE" = "403" ]; then
+                echo "⚠️ Access forbidden - check token permissions"
+              else
+                echo "⚠️ Unexpected status when checking comment"
+              fi
             fi
-
+            
+          elif [ "$SPAM_CHECK_RESULT" = "false" ]; then
+            echo "✅ CLEAN COMMENT"
+            echo "============================================"
+            echo "🟢 Akismet determined this is NOT spam"
+            echo "✨ Comment from @${COMMENT_AUTHOR} is allowed"
+            
           else
-            echo "✅ Comment passed spam check"
+            echo "⚠️ AKISMET ERROR"
+            echo "============================================"
+            echo "❌ Unexpected response from Akismet API"
+            echo "📄 Raw Response: '${SPAM_CHECK_RESULT}'"
+            echo "📈 HTTP Status: ${HTTP_CODE:-unknown}"
+            
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "🔍 This may indicate an API key issue or service problem"
+            fi
           fi
-
-          exit 0
+          
+          echo ""
+          echo "============================================"
+          echo "🏁 AKISMET SPAM DETECTION COMPLETED"
+          echo "⏰ End Time: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "============================================"
