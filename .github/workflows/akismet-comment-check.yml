@@ -10,7 +10,7 @@ jobs:
       - name: Check if comment is spam
         env:
           AKISMET_API_KEY: ${{ secrets.AKISMET_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
           COMMENT_URL: ${{ github.event.comment.url }}
@@ -20,7 +20,7 @@ jobs:
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
-          set -euo pipefail
+          set -uo pipefail  # 移除 -e 让脚本继续执行即使有错误
           
           echo "🔍 Checking comment from ${COMMENT_AUTHOR} for spam..."
           echo "Comment preview: ${COMMENT_BODY:0:100}..."
@@ -38,82 +38,121 @@ jobs:
             --data-urlencode "comment_type=comment" \
             --data-urlencode "comment_author=${COMMENT_AUTHOR}" \
             --data-urlencode "comment_content=${COMMENT_BODY}" \
-            || echo "false")
+            2>/dev/null || echo "false")
           
           echo "Akismet response: ${AKISMET_RESPONSE}"
           
           if [ "$AKISMET_RESPONSE" = "true" ]; then
             echo "🚫 Spam detected! Taking action..."
             
-            # 尝试删除评论
-            DELETE_RESPONSE=$(curl -s -w "%{http_code}" -o /dev/null -X DELETE "$COMMENT_URL" \
+            # 首先检查我们能否访问评论
+            echo "Checking comment accessibility..."
+            COMMENT_CHECK=$(curl -s -w "%{http_code}" -o /tmp/comment_check.json \
               -H "Authorization: token ${GITHUB_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
-              -H "User-Agent: AkismetBot/1.0")
+              -H "User-Agent: AkismetBot/1.0" \
+              "$COMMENT_URL")
             
-            if [ "$DELETE_RESPONSE" = "204" ]; then
-              echo "✅ Spam comment deleted successfully"
+            echo "Comment check response: ${COMMENT_CHECK}"
+            
+            if [ "$COMMENT_CHECK" = "200" ]; then
+              echo "Comment accessible, attempting deletion..."
               
-              # 创建一个 issue 来记录这个事件
-              ISSUE_BODY="🤖 **Spam Detection Report**
-              
-              Akismet detected and removed a spam comment from @${COMMENT_AUTHOR}.
-              
-              **Discussion**: ${DISCUSSION_TITLE}
-              **Original Comment URL**: ${COMMENT_HTML_URL}
-              **Detection Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-              
-              **Content Preview** (first 200 chars):
-              \`\`\`
-              ${COMMENT_BODY:0:200}$([ ${#COMMENT_BODY} -gt 200 ] && echo "...")
-              \`\`\`
-              
-              _This issue was created automatically by the spam detection system._"
-              
-              curl -s -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues" \
+              # 尝试删除评论
+              DELETE_RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/delete_response.txt \
+                -X DELETE "$COMMENT_URL" \
                 -H "Authorization: token ${GITHUB_TOKEN}" \
                 -H "Accept: application/vnd.github+json" \
-                -d "{
-                  \"title\": \"[Auto] Spam Comment Removed from Discussion: ${DISCUSSION_TITLE}\",
-                  \"body\": $(echo "$ISSUE_BODY" | jq -Rs .),
-                  \"labels\": [\"spam\", \"automated-moderation\"]
-                }" > /dev/null
+                -H "User-Agent: AkismetBot/1.0" \
+                2>/dev/null || echo "000")
               
-              echo "📧 Spam report issue created"
+              echo "Delete response code: ${DELETE_RESPONSE}"
               
+              if [ "$DELETE_RESPONSE" = "204" ]; then
+                echo "✅ Spam comment deleted successfully"
+                ACTION_TAKEN="deleted"
+              else
+                echo "❌ Failed to delete comment (HTTP ${DELETE_RESPONSE})"
+                if [ -f /tmp/delete_response.txt ]; then
+                  echo "Error details:"
+                  cat /tmp/delete_response.txt
+                fi
+                ACTION_TAKEN="delete_failed"
+              fi
             else
-              echo "❌ Failed to delete comment (HTTP ${DELETE_RESPONSE})"
-              
-              # 如果无法删除，创建一个警告 issue
-              ALERT_BODY="⚠️ **Spam Detection Alert**
-              
-              Akismet detected spam content from @${COMMENT_AUTHOR}, but automatic deletion failed.
-              
-              **Discussion**: ${DISCUSSION_TITLE}
-              **Comment URL**: ${COMMENT_HTML_URL}
-              **Detection Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-              
-              **Action Required**: Please manually review and moderate this comment.
-              
-              **Content Preview** (first 200 chars):
-              \`\`\`
-              ${COMMENT_BODY:0:200}$([ ${#COMMENT_BODY} -gt 200 ] && echo "...")
-              \`\`\`
-              
-              _This alert was generated automatically. Manual intervention required._"
-              
-              curl -s -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues" \
-                -H "Authorization: token ${GITHUB_TOKEN}" \
-                -H "Accept: application/vnd.github+json" \
-                -d "{
-                  \"title\": \"[URGENT] Spam Detected - Manual Review Required: ${DISCUSSION_TITLE}\",
-                  \"body\": $(echo "$ALERT_BODY" | jq -Rs .),
-                  \"labels\": [\"spam\", \"manual-review-required\", \"urgent\"]
-                }" > /dev/null
-              
-              echo "🚨 Manual review alert created"
+              echo "❌ Cannot access comment (HTTP ${COMMENT_CHECK})"
+              ACTION_TAKEN="access_failed"
+            fi
+            
+            # 创建报告 issue（无论删除是否成功）
+            echo "Creating spam report issue..."
+            
+            if [ "$ACTION_TAKEN" = "deleted" ]; then
+              ISSUE_TITLE="[Auto] Spam Comment Removed from Discussion: ${DISCUSSION_TITLE}"
+              ISSUE_BODY="🤖 **Spam Detection Report**
+
+Akismet detected and successfully removed a spam comment from @${COMMENT_AUTHOR}.
+
+**Discussion**: ${DISCUSSION_TITLE}
+**Original Comment URL**: ${COMMENT_HTML_URL}
+**Detection Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+
+**Content Preview** (first 200 chars):
+\`\`\`
+${COMMENT_BODY:0:200}$([ ${#COMMENT_BODY} -gt 200 ] && echo "...")
+\`\`\`
+
+_This issue was created automatically by the spam detection system._"
+              LABELS='["spam", "automated-moderation", "resolved"]'
+            else
+              ISSUE_TITLE="[URGENT] Spam Detected - Manual Review Required: ${DISCUSSION_TITLE}"
+              ISSUE_BODY="⚠️ **Spam Detection Alert**
+
+Akismet detected spam content from @${COMMENT_AUTHOR}, but automatic deletion failed.
+
+**Discussion**: ${DISCUSSION_TITLE}
+**Comment URL**: ${COMMENT_HTML_URL}
+**Detection Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+**Action Status**: ${ACTION_TAKEN}
+
+**Action Required**: Please manually review and moderate this comment.
+
+**Content Preview** (first 200 chars):
+\`\`\`
+${COMMENT_BODY:0:200}$([ ${#COMMENT_BODY} -gt 200 ] && echo "...")
+\`\`\`
+
+_This alert was generated automatically. Manual intervention required._"
+              LABELS='["spam", "manual-review-required", "urgent"]'
+            fi
+            
+            # 创建 issue
+            ISSUE_RESPONSE=$(curl -s -w "%{http_code}" -o /tmp/issue_response.json \
+              -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues" \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              -d "{
+                \"title\": $(echo "$ISSUE_TITLE" | jq -Rs .),
+                \"body\": $(echo "$ISSUE_BODY" | jq -Rs .),
+                \"labels\": $LABELS
+              }" 2>/dev/null || echo "000")
+            
+            if [ "${ISSUE_RESPONSE: -3}" = "201" ]; then
+              echo "📧 Spam report issue created successfully"
+            else
+              echo "❌ Failed to create issue (HTTP ${ISSUE_RESPONSE})"
+              if [ -f /tmp/issue_response.json ]; then
+                echo "Issue creation error details:"
+                cat /tmp/issue_response.json
+              fi
             fi
             
           else
             echo "✅ Comment passed spam check"
           fi
+          
+          # 清理临时文件
+          rm -f /tmp/comment_check.json /tmp/delete_response.txt /tmp/issue_response.json
+          
+          echo "🏁 Spam check workflow completed"
