@@ -85,15 +85,12 @@ jobs:
             echo ""
             
             # 构建 GraphQL 删除评论的 mutation
-            GRAPHQL_MUTATION=$(cat << EOF
-{
-  "query": "mutation DeleteDiscussionComment(\$commentId: ID!) { deleteDiscussionComment(input: { id: \$commentId }) { clientMutationId } }",
-  "variables": {
-    "commentId": "${COMMENT_NODE_ID}"
-  }
-}
-EOF
-)
+            GRAPHQL_MUTATION='{
+              "query": "mutation DeleteDiscussionComment($commentId: ID!) { deleteDiscussionComment(input: { id: $commentId }) { clientMutationId } }",
+              "variables": {
+                "commentId": "'${COMMENT_NODE_ID}'"
+              }
+            }'
             
             echo "🔄 正在发送 GraphQL 删除请求..."
             DELETE_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}\nTOTAL_TIME:%{time_total}" \
