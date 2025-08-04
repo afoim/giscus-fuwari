@@ -1,4 +1,4 @@
-name: Akismet Discussion Comment Checker (Debug)
+name: Akismet Discussion Comment Checker (GraphQL)
 on:
   discussion_comment:
     types: [created]
@@ -13,11 +13,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
           COMMENT_BODY: ${{ github.event.comment.body }}
           COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
-          COMMENT_ID: ${{ github.event.comment.id }}
           COMMENT_NODE_ID: ${{ github.event.comment.node_id }}
           COMMENT_HTML_URL: ${{ github.event.comment.html_url }}
-          DISCUSSION_ID: ${{ github.event.discussion.id }}
-          DISCUSSION_NUMBER: ${{ github.event.discussion.number }}
           DISCUSSION_TITLE: ${{ github.event.discussion.title }}
           REPO_OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
@@ -25,48 +22,21 @@ jobs:
           set -uo pipefail
           
           echo "============================================"
-          echo "🤖 开始 AKISMET 垃圾评论检测 (调试模式)"
+          echo "🤖 开始 AKISMET 垃圾评论检测 (GraphQL)"
           echo "============================================"
           echo "⏰ 检测时间: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "👤 评论作者: ${COMMENT_AUTHOR}"
           echo "📝 评论长度: ${#COMMENT_BODY} 个字符"
-          echo "🆔 评论 ID: ${COMMENT_ID}"
           echo "🗂️ 仓库名称: ${REPO_OWNER}/${REPO_NAME}"
           echo "💬 讨论标题: ${DISCUSSION_TITLE}"
-          echo "📊 讨论编号: ${DISCUSSION_NUMBER}"
           echo "🔗 评论链接: ${COMMENT_HTML_URL}"
+          echo "🆔 Comment Node ID: ${COMMENT_NODE_ID}"
           echo ""
           
           echo "📄 评论内容:"
           echo "----------------------------------------"
           echo "${COMMENT_BODY}"
           echo "----------------------------------------"
-          echo ""
-          
-          # 详细的环境变量检查
-          echo "🔧 环境变量详细检查:"
-          echo "✅ AKISMET_API_KEY: ${AKISMET_API_KEY:0:8}..."
-          echo "✅ GITHUB_TOKEN: ${GITHUB_TOKEN:0:8}..."
-          echo "🆔 COMMENT_ID: ${COMMENT_ID}"
-          echo "🆔 COMMENT_NODE_ID: ${COMMENT_NODE_ID}"
-          echo "📊 DISCUSSION_ID: ${DISCUSSION_ID}"
-          echo "📊 DISCUSSION_NUMBER: ${DISCUSSION_NUMBER}"
-          echo ""
-          
-          # 构建正确的 API URL
-          echo "🔍 构建 API URL:"
-          # GitHub Discussions API 路径
-          COMMENT_API_URL="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/discussions/${DISCUSSION_NUMBER}/comments/${COMMENT_ID}"
-          echo "📡 构建的 API URL: ${COMMENT_API_URL}"
-          echo ""
-          
-          # 尝试从 GitHub event 中获取更多信息
-          echo "📊 GitHub Event 信息:"
-          echo "仓库所有者: ${REPO_OWNER}"
-          echo "仓库名称: ${REPO_NAME}"
-          echo "讨论标题: ${DISCUSSION_TITLE}"
-          echo "讨论编号: ${DISCUSSION_NUMBER}"
-          echo "评论 ID: ${COMMENT_ID}"
           echo ""
           
           # 构建 Akismet API 请求
@@ -87,7 +57,7 @@ jobs:
             --data-urlencode "comment_type=comment" \
             --data-urlencode "comment_author=${COMMENT_AUTHOR}" \
             --data-urlencode "comment_content=${COMMENT_BODY}" \
-            2>&1 || echo "CURL_ERROR")
+            2>/dev/null || echo "false")
           
           # 解析响应
           SPAM_CHECK_RESULT=$(echo "$AKISMET_RESPONSE" | head -n1)
@@ -98,90 +68,77 @@ jobs:
           echo "📈 HTTP 状态码: ${HTTP_CODE:-未知}"
           echo "⏱️ 响应时间: ${RESPONSE_TIME:-未知}秒"
           echo "🎯 垃圾评论检测结果: '${SPAM_CHECK_RESULT}'"
-          echo "📄 完整响应: ${AKISMET_RESPONSE}"
           echo ""
           
           # 检查是否为垃圾评论
           if [ "$SPAM_CHECK_RESULT" = "true" ]; then
             echo "🚨 检测到垃圾评论!"
             echo "============================================"
-            echo "🗑️ 正在尝试删除垃圾评论..."
+            echo "🗑️ 正在使用 GraphQL API 删除垃圾评论..."
             echo ""
             
-            # 首先测试 GitHub API 连接性
-            echo "🔍 测试 GitHub API 连接性:"
-            echo "正在测试基本 API 访问..."
-            
-            API_TEST=$(curl -s -w "HTTP_CODE:%{http_code}" \
-              -H "Authorization: token ${GITHUB_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "User-Agent: AkismetBot/1.0" \
-              "https://api.github.com/user" 2>&1 || echo "API_ERROR")
-            
-            API_TEST_CODE=$(echo "$API_TEST" | grep "HTTP_CODE:" | cut -d: -f2)
-            echo "📡 GitHub API 测试状态: ${API_TEST_CODE:-错误}"
-            
-            if [ "$API_TEST_CODE" = "200" ]; then
-              echo "✅ GitHub API 访问正常"
-            else
-              echo "❌ GitHub API 访问失败"
-              echo "📄 API 测试响应: ${API_TEST}"
-            fi
-            echo ""
-            
-            # 尝试访问仓库信息
-            echo "🔍 测试仓库访问权限:"
-            REPO_TEST=$(curl -s -w "HTTP_CODE:%{http_code}" \
-              -H "Authorization: token ${GITHUB_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "User-Agent: AkismetBot/1.0" \
-              "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}" 2>&1 || echo "REPO_ERROR")
-            
-            REPO_TEST_CODE=$(echo "$REPO_TEST" | grep "HTTP_CODE:" | cut -d: -f2)
-            echo "📡 仓库访问状态: ${REPO_TEST_CODE:-错误}"
-            echo ""
-            
-            # 现在尝试删除评论
-            echo "🔍 GitHub API 删除请求:"
-            echo "📡 API 接口: ${COMMENT_API_URL}"
+            # 使用 GraphQL API 删除评论
+            echo "🔍 GitHub GraphQL API 删除请求:"
+            echo "📡 API 接口: https://api.github.com/graphql"
+            echo "🆔 Comment Node ID: ${COMMENT_NODE_ID}"
             echo "🔑 认证令牌: token ${GITHUB_TOKEN:0:8}..."
             echo ""
             
-            DELETE_RESPONSE=$(curl -v -s -w "\nHTTP_CODE:%{http_code}\nTOTAL_TIME:%{time_total}" \
-              -X DELETE "$COMMENT_API_URL" \
-              -H "Authorization: token ${GITHUB_TOKEN}" \
-              -H "Accept: application/vnd.github+json" \
-              -H "User-Agent: AkismetBot/1.0" \
-              2>&1 || echo "DELETE_ERROR")
+            # 构建 GraphQL 删除评论的 mutation
+            GRAPHQL_MUTATION=$(cat << EOF
+{
+  "query": "mutation DeleteDiscussionComment(\$commentId: ID!) { deleteDiscussionComment(input: { id: \$commentId }) { clientMutationId } }",
+  "variables": {
+    "commentId": "${COMMENT_NODE_ID}"
+  }
+}
+EOF
+)
             
-            echo "📄 删除请求完整响应:"
-            echo "${DELETE_RESPONSE}"
-            echo ""
+            echo "🔄 正在发送 GraphQL 删除请求..."
+            DELETE_RESPONSE=$(curl -s -w "\nHTTP_CODE:%{http_code}\nTOTAL_TIME:%{time_total}" \
+              -X POST "https://api.github.com/graphql" \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -H "User-Agent: AkismetBot/1.0" \
+              -d "$GRAPHQL_MUTATION" \
+              2>/dev/null || echo "DELETE_ERROR")
             
             DELETE_HTTP_CODE=$(echo "$DELETE_RESPONSE" | grep "HTTP_CODE:" | cut -d: -f2)
             DELETE_TIME=$(echo "$DELETE_RESPONSE" | grep "TOTAL_TIME:" | cut -d: -f2)
+            DELETE_BODY=$(echo "$DELETE_RESPONSE" | head -n -2)
             
             echo "📊 删除请求响应:"
             echo "📈 HTTP 状态码: ${DELETE_HTTP_CODE:-未知}"
             echo "⏱️ 响应时间: ${DELETE_TIME:-未知}秒"
+            echo "📄 响应内容: ${DELETE_BODY}"
+            echo ""
             
-            if [ "$DELETE_HTTP_CODE" = "204" ]; then
-              echo "✅ 成功: 垃圾评论已成功删除"
-              echo "🎉 来自 @${COMMENT_AUTHOR} 的评论已被移除"
-            else
-              echo "❌ 失败: 无法删除评论"
-              echo "🔍 HTTP 状态码: ${DELETE_HTTP_CODE}"
-              
-              # 分析可能的原因
-              if [ "$DELETE_HTTP_CODE" = "403" ]; then
-                echo "⚠️ 权限不足 - Token 可能没有删除评论的权限"
-              elif [ "$DELETE_HTTP_CODE" = "404" ]; then
-                echo "⚠️ 评论未找到 - URL 可能不正确或评论已被删除"
-              elif [ "$DELETE_HTTP_CODE" = "422" ]; then
-                echo "⚠️ 请求格式错误 - API 调用可能有问题"
+            # 检查是否删除成功
+            if [ "$DELETE_HTTP_CODE" = "200" ]; then
+              # 检查 GraphQL 响应中是否有错误
+              if echo "$DELETE_BODY" | grep -q '"errors"'; then
+                echo "❌ GraphQL 错误: 删除失败"
+                echo "🔍 错误详情:"
+                echo "$DELETE_BODY" | jq '.errors' 2>/dev/null || echo "$DELETE_BODY"
+                
+                # 分析常见错误
+                if echo "$DELETE_BODY" | grep -q "Resource not accessible"; then
+                  echo "⚠️ 资源不可访问 - 可能是权限问题或评论已被删除"
+                elif echo "$DELETE_BODY" | grep -q "Could not resolve to a node"; then
+                  echo "⚠️ 无法解析节点ID - Node ID 可能不正确"
+                else
+                  echo "⚠️ 其他 GraphQL 错误"
+                fi
               else
-                echo "⚠️ 未知错误 - 请检查完整响应信息"
+                echo "✅ 成功: 垃圾评论已成功删除"
+                echo "🎉 来自 @${COMMENT_AUTHOR} 的评论已被移除"
+                echo "📄 删除结果: ${DELETE_BODY}"
               fi
+            else
+              echo "❌ 失败: HTTP 请求失败"
+              echo "🔍 HTTP 状态码: ${DELETE_HTTP_CODE}"
+              echo "📄 错误响应: ${DELETE_BODY}"
             fi
             
           elif [ "$SPAM_CHECK_RESULT" = "false" ]; then
@@ -196,6 +153,10 @@ jobs:
             echo "❌ Akismet API 返回意外响应"
             echo "📄 原始响应: '${SPAM_CHECK_RESULT}'"
             echo "📈 HTTP 状态码: ${HTTP_CODE:-未知}"
+            
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "🔍 这可能表示 API 密钥问题或服务故障"
+            fi
           fi
           
           echo ""
