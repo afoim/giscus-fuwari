@@ -8,90 +8,112 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check if comment is spam
-        uses: actions/github-script@v7
         env:
           AKISMET_API_KEY: ${{ secrets.AKISMET_API_KEY }}
-          GITHUB_TOKEN_BOT: ${{ secrets.GH_TOKEN }}
-        with:
-          script: |
-            const { HttpClient } = require('@actions/http-client');
-            const http = new HttpClient('GitHubActionBot/1.0');
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENT_URL: ${{ github.event.comment.url }}
+          COMMENT_HTML_URL: ${{ github.event.comment.html_url }}
+          DISCUSSION_TITLE: ${{ github.event.discussion.title }}
+          DISCUSSION_NUMBER: ${{ github.event.discussion.number }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          
+          echo "🔍 Checking comment from ${COMMENT_AUTHOR} for spam..."
+          echo "Comment preview: ${COMMENT_BODY:0:100}..."
+          
+          # 准备 Akismet API 请求数据
+          AKISMET_URL="https://${AKISMET_API_KEY}.rest.akismet.com/1.1/comment-check"
+          
+          # 使用 curl 检查垃圾评论
+          AKISMET_RESPONSE=$(curl -s -X POST "$AKISMET_URL" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -H "User-Agent: GitHubActionBot/1.0" \
+            --data-urlencode "blog=https://github.com/${REPO_OWNER}/${REPO_NAME}" \
+            --data-urlencode "user_ip=127.0.0.1" \
+            --data-urlencode "user_agent=GitHubActionBot/1.0" \
+            --data-urlencode "comment_type=comment" \
+            --data-urlencode "comment_author=${COMMENT_AUTHOR}" \
+            --data-urlencode "comment_content=${COMMENT_BODY}" \
+            || echo "false")
+          
+          echo "Akismet response: ${AKISMET_RESPONSE}"
+          
+          if [ "$AKISMET_RESPONSE" = "true" ]; then
+            echo "🚫 Spam detected! Taking action..."
             
-            const comment = context.payload.comment;
-            const discussion = context.payload.discussion;
-            const author = comment.author?.login || 'anonymous';
-            const user_ip = "127.0.0.1";
-            const user_agent = "GitHubActionBot/1.0";
+            # 尝试删除评论
+            DELETE_RESPONSE=$(curl -s -w "%{http_code}" -o /dev/null -X DELETE "$COMMENT_URL" \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "User-Agent: AkismetBot/1.0")
             
-            const akismetCheck = async () => {
-              // 构建表单数据
-              const formData = new URLSearchParams();
-              formData.append('blog', 'https://github.com');
-              formData.append('user_ip', user_ip);
-              formData.append('user_agent', user_agent);
-              formData.append('comment_type', 'comment');
-              formData.append('comment_author', author);
-              formData.append('comment_content', comment.body || '');
+            if [ "$DELETE_RESPONSE" = "204" ]; then
+              echo "✅ Spam comment deleted successfully"
               
-              const akismetUrl = `https://${process.env.AKISMET_API_KEY}.rest.akismet.com/1.1/comment-check`;
+              # 创建一个 issue 来记录这个事件
+              ISSUE_BODY="🤖 **Spam Detection Report**
               
-              try {
-                const response = await http.post(akismetUrl, formData.toString(), {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  'User-Agent': 'GitHubActionBot/1.0'
-                });
-                
-                if (response.message.statusCode !== 200) {
-                  throw new Error(`Akismet API error: ${response.message.statusCode}`);
-                }
-                
-                const body = await response.readBody();
-                return body.trim() === 'true';
-              } catch (error) {
-                console.error('Error checking with Akismet:', error);
-                return false;
-              }
-            };
+              Akismet detected and removed a spam comment from @${COMMENT_AUTHOR}.
+              
+              **Discussion**: ${DISCUSSION_TITLE}
+              **Original Comment URL**: ${COMMENT_HTML_URL}
+              **Detection Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+              
+              **Content Preview** (first 200 chars):
+              \`\`\`
+              ${COMMENT_BODY:0:200}$([ ${#COMMENT_BODY} -gt 200 ] && echo "...")
+              \`\`\`
+              
+              _This issue was created automatically by the spam detection system._"
+              
+              curl -s -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues" \
+                -H "Authorization: token ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                -d "{
+                  \"title\": \"[Auto] Spam Comment Removed from Discussion: ${DISCUSSION_TITLE}\",
+                  \"body\": $(echo "$ISSUE_BODY" | jq -Rs .),
+                  \"labels\": [\"spam\", \"automated-moderation\"]
+                }" > /dev/null
+              
+              echo "📧 Spam report issue created"
+              
+            else
+              echo "❌ Failed to delete comment (HTTP ${DELETE_RESPONSE})"
+              
+              # 如果无法删除，创建一个警告 issue
+              ALERT_BODY="⚠️ **Spam Detection Alert**
+              
+              Akismet detected spam content from @${COMMENT_AUTHOR}, but automatic deletion failed.
+              
+              **Discussion**: ${DISCUSSION_TITLE}
+              **Comment URL**: ${COMMENT_HTML_URL}
+              **Detection Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+              
+              **Action Required**: Please manually review and moderate this comment.
+              
+              **Content Preview** (first 200 chars):
+              \`\`\`
+              ${COMMENT_BODY:0:200}$([ ${#COMMENT_BODY} -gt 200 ] && echo "...")
+              \`\`\`
+              
+              _This alert was generated automatically. Manual intervention required._"
+              
+              curl -s -X POST "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/issues" \
+                -H "Authorization: token ${GITHUB_TOKEN}" \
+                -H "Accept: application/vnd.github+json" \
+                -d "{
+                  \"title\": \"[URGENT] Spam Detected - Manual Review Required: ${DISCUSSION_TITLE}\",
+                  \"body\": $(echo "$ALERT_BODY" | jq -Rs .),
+                  \"labels\": [\"spam\", \"manual-review-required\", \"urgent\"]
+                }" > /dev/null
+              
+              echo "🚨 Manual review alert created"
+            fi
             
-            try {
-              const isSpam = await akismetCheck();
-              
-              if (isSpam) {
-                console.log('🚫 Detected spam comment. Processing...');
-                
-                // 使用 GitHub REST API 删除评论
-                try {
-                  await github.rest.teams.deleteDiscussionCommentInOrg({
-                    org: context.repo.owner,
-                    team_slug: context.repo.repo,
-                    discussion_number: discussion.number,
-                    comment_number: comment.number
-                  });
-                  
-                  console.log('✅ Spam comment deleted successfully');
-                  
-                  // 记录日志到 Discussion
-                  await github.rest.teams.createDiscussionCommentInOrg({
-                    org: context.repo.owner,
-                    team_slug: context.repo.repo,
-                    discussion_number: discussion.number,
-                    body: `🤖 **Spam Detection**: Akismet detected and removed a spam comment from @${author}.\n\n_This action was performed automatically._`
-                  });
-                  
-                } catch (deleteError) {
-                  console.error('❌ Failed to delete comment:', deleteError);
-                  
-                  // 如果删除失败，至少标记为spam
-                  await github.rest.teams.createDiscussionCommentInOrg({
-                    org: context.repo.owner,
-                    team_slug: context.repo.repo,
-                    discussion_number: discussion.number,
-                    body: `⚠️ **Spam Alert**: Akismet detected spam content from @${author}. Manual review required.\n\n_This alert was generated automatically._`
-                  });
-                }
-              } else {
-                console.log('✅ Comment passed spam check');
-              }
-            } catch (error) {
-              console.error('❌ Error in spam checking workflow:', error);
-            }
+          else
+            echo "✅ Comment passed spam check"
+          fi
