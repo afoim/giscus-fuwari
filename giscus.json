@@ -1,4 +1,4 @@
 {
   "origins": ["https://feed.2x.nz"],
-  "originsRegex": ["http://localhost:5173"]
+  "originsRegex": ["http://localhost:8080"]
 }
