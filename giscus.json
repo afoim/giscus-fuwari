@@ -1,4 +1,4 @@
 {
   "origins": ["https://2x.nz", "https://acofork.com"],
-  "originsRegex": ["http://localhost:5173"]
+  "originsRegex": ["http://localhost:3000"]
 }
